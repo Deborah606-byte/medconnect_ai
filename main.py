@@ -21,7 +21,7 @@ app = FastAPI()
 
 def load_hospitals() -> List[Dict[str, str]]:
     hospitals = []
-    with open('hospitals.csv', 'r') as file:
+    with open('cleaned_hospitals.csv', 'r') as file:
         csv_reader = csv.DictReader(file)
         for row in csv_reader:
             hospitals.append(row)
