@@ -2,9 +2,6 @@ import csv
 from typing import List, Dict
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Dict
-import os
-
 from langchain.agents import Tool, AgentExecutor, LLMSingleActionAgent, AgentOutputParser
 from langchain.prompts import StringPromptTemplate
 from langchain.chains import LLMChain
@@ -41,7 +38,7 @@ def find_nearby_hospitals(location: str) -> List[str]:
 # Custom search wrapper
 def duck_wrapper(input_text):
     search = DuckDuckGoSearchRun()
-    search_results = search.run(f"site:webmd.com {input_text}")
+    search_results = search.run(f"site:uptodate.com {input_text}")
     
     # Extract location from input
     location = input_text.split("Location:")[-1].split("\n")[0].strip() if "Location:" in input_text else ""
@@ -54,7 +51,7 @@ def duck_wrapper(input_text):
             search_results += "\n\nNo specific healthcare facilities found in the exact location, please consult with a local healthcare provider."
     
     # Add medication suggestions
-    medication_results = search.run(f"site:webmd.com {input_text} medications")
+    medication_results = search.run(f"site:drugs.com {input_text} medications")
     search_results += "\n\nSuggested Medications:\n" + "\n".join(medication_results[:5])  # Limit to top 5 for brevity
     
     return search_results
@@ -62,7 +59,7 @@ def duck_wrapper(input_text):
 # Define tools
 tools = [
     Tool(
-        name="Search WebMD",
+        name="Search UpToDate and Drugs.com",
         func=duck_wrapper,
         description="useful for when you need to answer medical and pharmacological questions"
     )
