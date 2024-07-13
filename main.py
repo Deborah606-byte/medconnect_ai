@@ -202,6 +202,13 @@ class Chat(BaseModel):
     title: str
     chatId: str
 
+class MessageResponse(BaseModel):
+    id: str
+    chatObjectId: str
+    question: str
+    observation: List[str]
+    answer: str
+
 # Helper function to generate chatId
 def generate_chat_id() -> str:
     latest_chat = chats_collection.find_one(sort=[("chatId", -1)])
@@ -224,6 +231,8 @@ def generate_chat_title(question: str) -> str:
         title = title[:27] + "..."
     
     return title
+
+# FastAPI endpoint to handle chat requests
 
 # FastAPI endpoint to handle chat requests
 @app.post("/chat", response_model=ChatResponse)
@@ -251,7 +260,7 @@ async def chat(request: ChatRequest):
 
         # Save message data to MongoDB with reference to chat's ObjectId and chatId
         message_data = {
-            "chatObjectId": chat_object_id,
+            "chatObjectId": str(chat_object_id),  # Convert ObjectId to string
             "chatId": chat_id,
             "question": request.question.text,
             "observation": outputs,
@@ -259,6 +268,9 @@ async def chat(request: ChatRequest):
         }
         message_insert_result = messages_collection.insert_one(message_data)
         message_object_id = message_insert_result.inserted_id
+        
+        print(f"Chat ObjectId: {chat_object_id}")  # Debugging statement
+        print(f"Message ObjectId: {message_object_id}")  # Debugging statement
         
         return ChatResponse(observation=outputs, answer=response, chatObjectId=str(chat_object_id), messageObjectId=str(message_object_id))
     except Exception as e:
@@ -274,6 +286,21 @@ async def get_all_chats():
             chat["chatId"] = chat.get("chatId", "Unknown")  # Add chatId if missing
             del chat["_id"]
         return chats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# FastAPI endpoint to get messages by chatObjectId
+@app.get("/messages/{chatObjectId}", response_model=List[MessageResponse])
+async def get_messages_by_chat_object_id(chatObjectId: str):
+    try:
+        print(f"Fetching messages for chatObjectId: {chatObjectId}")  # Debugging statement
+        messages = list(messages_collection.find({"chatObjectId": chatObjectId}))  # Query using string chatObjectId
+        print(f"Messages found: {len(messages)}")  # Debugging statement
+        for message in messages:
+            message["id"] = str(message["_id"])
+            message["chatObjectId"] = str(message["chatObjectId"])  # Ensure chatObjectId is a string
+            del message["_id"]
+        return messages
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
