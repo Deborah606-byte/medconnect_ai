@@ -214,11 +214,14 @@ def generate_chat_id() -> str:
     latest_chat = chats_collection.find_one(sort=[("chatId", -1)])
     if latest_chat:
         latest_id = latest_chat["chatId"]
+        print(f"Latest chatId: {latest_id}")  # Debugging statement
         number = int(latest_id.replace("MDCKC", "")) + 1
         new_chat_id = f"MDCKC{number:03d}"
     else:
         new_chat_id = "MDCKC001"
+    print(f"Generated chatId: {new_chat_id}")  # Debugging statement
     return new_chat_id
+
 
 # Helper function to generate chat title
 def generate_chat_title(question: str) -> str:
@@ -231,8 +234,6 @@ def generate_chat_title(question: str) -> str:
         title = title[:27] + "..."
     
     return title
-
-# FastAPI endpoint to handle chat requests
 
 # FastAPI endpoint to handle chat requests
 @app.post("/chat", response_model=ChatResponse)
@@ -253,7 +254,8 @@ async def chat(request: ChatRequest):
         # Save chat data to MongoDB and get the ObjectId
         chat_data = {
             "patient": request.patient.dict(),
-            "title": chat_title
+            "title": chat_title,
+            "chatId": chat_id
         }
         chat_insert_result = chats_collection.insert_one(chat_data)
         chat_object_id = chat_insert_result.inserted_id
