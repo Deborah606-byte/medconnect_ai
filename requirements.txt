@@ -6,3 +6,6 @@ duckduckgo-search
 langchain-community
 langchain-openai
 python-dotenv
+pymongo 
+dnspython 
+pydantic

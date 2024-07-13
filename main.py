@@ -11,17 +11,36 @@ from langchain.schema import AgentAction, AgentFinish
 from langchain.memory import ConversationBufferWindowMemory
 import re
 from dotenv import load_dotenv
+from pymongo import MongoClient
+from bson import ObjectId
+import os
 
 load_dotenv()
 
 app = FastAPI()
 
+MONGO_URI = os.getenv("ATLAS_URI")
+DATABASE_NAME = os.getenv("DATABASE_NAME")
+
+# Connect to MongoDB
+try:
+    client = MongoClient(MONGO_URI)
+    db = client[DATABASE_NAME]
+    chats_collection = db["chats"]
+    messages_collection = db["messages"]
+except Exception as e:
+    print(f"Error connecting to MongoDB: {e}")
+    raise
+
 def load_hospitals() -> List[Dict[str, str]]:
     hospitals = []
-    with open('cleaned_hospitals.csv', 'r') as file:
-        csv_reader = csv.DictReader(file)
-        for row in csv_reader:
-            hospitals.append(row)
+    try:
+        with open('cleaned_hospitals.csv', 'r') as file:
+            csv_reader = csv.DictReader(file)
+            for row in csv_reader:
+                hospitals.append(row)
+    except FileNotFoundError:
+        print("Error: 'cleaned_hospitals.csv' file not found.")
     return hospitals
 
 hospitals_data = load_hospitals()
@@ -174,19 +193,87 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     observation: List[str]
     answer: str
+    chatObjectId: str
+    messageObjectId: str
 
-# FastAPI endpoint
+class Chat(BaseModel):
+    id: str
+    patient: PatientInfo
+    title: str
+    chatId: str
+
+# Helper function to generate chatId
+def generate_chat_id() -> str:
+    latest_chat = chats_collection.find_one(sort=[("chatId", -1)])
+    if latest_chat:
+        latest_id = latest_chat["chatId"]
+        number = int(latest_id.replace("MDCKC", "")) + 1
+        new_chat_id = f"MDCKC{number:03d}"
+    else:
+        new_chat_id = "MDCKC001"
+    return new_chat_id
+
+# Helper function to generate chat title
+def generate_chat_title(question: str) -> str:
+    # Extract the last few significant words from the question
+    words = question.split()
+    title = " ".join(words[-2:])  # Adjust the number of words as needed
+    
+    # Ensure the title is not too long
+    if len(title) > 30:
+        title = title[:27] + "..."
+    
+    return title
+
+# FastAPI endpoint to handle chat requests
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     global outputs
     outputs = []  # Clear previous outputs
     try:
+        # Generate chat data
+        chat_id = generate_chat_id()
         patient_context = f"Patient: {request.patient.name}, Age: {request.patient.age}, Gender: {request.patient.gender}, Location: {request.patient.location}"
         full_question = f"{patient_context}\n\nQuestion: {request.question.text}\n\nPlease include nearby healthcare facility recommendations, suggested medications, and a list of questions to ask the patient for better diagnosis in your answer if available."
         
         response = agent_executor.run(full_question)
+
+        # Generate chat title using the question
+        chat_title = generate_chat_title(request.question.text)
         
-        return ChatResponse(observation=outputs, answer=response)
+        # Save chat data to MongoDB and get the ObjectId
+        chat_data = {
+            "patient": request.patient.dict(),
+            "title": chat_title
+        }
+        chat_insert_result = chats_collection.insert_one(chat_data)
+        chat_object_id = chat_insert_result.inserted_id
+
+        # Save message data to MongoDB with reference to chat's ObjectId and chatId
+        message_data = {
+            "chatObjectId": chat_object_id,
+            "chatId": chat_id,
+            "question": request.question.text,
+            "observation": outputs,
+            "answer": response
+        }
+        message_insert_result = messages_collection.insert_one(message_data)
+        message_object_id = message_insert_result.inserted_id
+        
+        return ChatResponse(observation=outputs, answer=response, chatObjectId=str(chat_object_id), messageObjectId=str(message_object_id))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# FastAPI endpoint to get all chats
+@app.get("/chats", response_model=List[Chat])
+async def get_all_chats():
+    try:
+        chats = list(chats_collection.find())
+        for chat in chats:
+            chat["id"] = str(chat["_id"])
+            chat["chatId"] = chat.get("chatId", "Unknown")  # Add chatId if missing
+            del chat["_id"]
+        return chats
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
