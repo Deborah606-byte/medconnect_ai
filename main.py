@@ -1,6 +1,7 @@
 import csv
 from typing import List, Dict
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain.agents import Tool, AgentExecutor, LLMSingleActionAgent, AgentOutputParser
 from langchain.prompts import StringPromptTemplate
@@ -18,6 +19,24 @@ import os
 load_dotenv()
 
 app = FastAPI()
+
+# Configure CORS
+def configure_cors(app: FastAPI):
+    origins = [
+        "http://localhost",  # Allow local frontend
+        "http://localhost:3000",  # Allow local frontend running on port 3000
+    ]
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,  # Allow specific origins
+        allow_credentials=True,
+        allow_methods=["*"],  # Allow all methods (GET, POST, etc.)
+        allow_headers=["*"],  # Allow all headers
+    )
+
+# Configure CORS
+configure_cors(app)
 
 MONGO_URI = os.getenv("ATLAS_URI")
 DATABASE_NAME = os.getenv("DATABASE_NAME")
@@ -189,12 +208,14 @@ class Question(BaseModel):
 class ChatRequest(BaseModel):
     patient: PatientInfo
     question: Question
+    userId: str
 
 class ChatResponse(BaseModel):
     observation: List[str]
     answer: str
     chatObjectId: str
-    messageObjectId: str
+    id: str
+    question: str
 
 class Chat(BaseModel):
     id: str
@@ -209,6 +230,13 @@ class MessageResponse(BaseModel):
     observation: List[str]
     answer: str
 
+class MessageRequest(BaseModel):
+    question: Question  
+    userId: str
+
+class Question(BaseModel):
+    text: str
+    
 # Helper function to generate chatId
 def generate_chat_id() -> str:
     latest_chat = chats_collection.find_one(sort=[("chatId", -1)])
@@ -235,48 +263,143 @@ def generate_chat_title(question: str) -> str:
     
     return title
 
-# FastAPI endpoint to handle chat requests
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     global outputs
     outputs = []  # Clear previous outputs
-    try:
-        # Generate chat data
-        chat_id = generate_chat_id()
-        patient_context = f"Patient: {request.patient.name}, Age: {request.patient.age}, Gender: {request.patient.gender}, Location: {request.patient.location}"
-        full_question = f"{patient_context}\n\nQuestion: {request.question.text}\n\nPlease include nearby healthcare facility recommendations, suggested medications, and a list of questions to ask the patient for better diagnosis in your answer if available."
-        
-        response = agent_executor.run(full_question)
 
-        # Generate chat title using the question
-        chat_title = generate_chat_title(request.question.text)
+    def process_response(response: str):
+        chat_title_index = response.rfind("ChatTitle:")
+        message, chat_title = "", ""
+        if chat_title_index != -1:
+            # Extract the message (everything before "ChatTitle:")
+            message = response[:chat_title_index].strip()
+            
+            # Extract the chat title (everything after "ChatTitle:")
+            chat_title = response[chat_title_index + len("ChatTitle:"):].strip()
         
+        return message, chat_title
+
+    def save_message(chat_object_id, chat_id, question, observation, answer):
+        message_data = {
+            "chatObjectId": str(chat_object_id),  # Convert ObjectId to string
+            "chatId": chat_id,
+            "question": question,
+            "observation": observation,
+            "answer": answer
+        }
+        message_insert_result = messages_collection.insert_one(message_data)
+        return message_insert_result.inserted_id
+
+    def handle_chat_and_save_message(request, message, chat_title):
+        chat_id = generate_chat_id()
+
         # Save chat data to MongoDB and get the ObjectId
         chat_data = {
             "patient": request.patient.dict(),
             "title": chat_title,
-            "chatId": chat_id
+            "chatId": chat_id,
+            "userId": str(request.userId)
         }
         chat_insert_result = chats_collection.insert_one(chat_data)
         chat_object_id = chat_insert_result.inserted_id
 
-        # Save message data to MongoDB with reference to chat's ObjectId and chatId
+        # Save message data to MongoDB with reference to the chat's ObjectId and chatId
+        message_object_id = save_message(chat_object_id, chat_id, request.question.text, outputs, message)
+
+        return chat_object_id, message_object_id
+
+    try:
+        # Generate chat data
+        patient_context = f"Patient: {request.patient.name}, Age: {request.patient.age}, Gender: {request.patient.gender}, Location: {request.patient.location}"
+        full_question = f"{patient_context}\n\nQuestion: {request.question.text}\n\nPlease include nearby healthcare facility recommendations, suggested medications, and a list of questions to ask the patient for better diagnosis in your answer if available. End your answer with ChatTitle:(the title of the chat in 2-3 words)"
+        
+        response = agent_executor.run(full_question)
+        message, chat_title = process_response(response)
+
+        chat_object_id, message_object_id = handle_chat_and_save_message(request, message, chat_title)
+
+        return ChatResponse(observation=outputs, answer=message, chatObjectId=str(chat_object_id), id=str(message_object_id), question=request.question.text)
+    
+    except Exception as e:
+        error_message = str(e)
+        if "Could not parse LLM output:" in error_message:
+            response = error_message.split("Could not parse LLM output:")[1].strip()
+            message, chat_title = process_response(response)
+            
+            chat_object_id, message_object_id = handle_chat_and_save_message(request, message, chat_title)
+            
+            return ChatResponse(observation=outputs, answer=message, chatObjectId=str(chat_object_id), id=str(message_object_id), question=request.question.text)
+        
+        raise HTTPException(status_code=500, detail=error_message)
+
+
+#FastAPI endpoint to add an existing message to a chat
+@app.post("/message/{chatObjectId}", response_model=ChatResponse)
+async def add_message_to_chat(chatObjectId: str, request: MessageRequest):
+    global outputs
+    outputs = []  # Clear previous outputs
+
+    def process_response(response: str):
+        return response.strip(), ""  # No chat title for follow-up messages
+
+    def save_message(chat_object_id, chat_id, question, observation, answer):
         message_data = {
-            "chatObjectId": str(chat_object_id),  # Convert ObjectId to string
+            "chatObjectId": chat_object_id,
             "chatId": chat_id,
-            "question": request.question.text,
-            "observation": outputs,
-            "answer": response
+            "question": question,
+            "observation": observation,
+            "answer": answer
         }
         message_insert_result = messages_collection.insert_one(message_data)
-        message_object_id = message_insert_result.inserted_id
+        return message_insert_result.inserted_id
+
+    try:
+        chat = chats_collection.find_one({"_id": ObjectId(chatObjectId)})
+        if not chat:
+            raise HTTPException(status_code=404, detail="Chat not found")
+
+        chat_history = list(messages_collection.find({"chatObjectId": chatObjectId}).sort("_id", 1))
         
-        print(f"Chat ObjectId: {chat_object_id}")  # Debugging statement
-        print(f"Message ObjectId: {message_object_id}")  # Debugging statement
+        context = f"This is a follow-up question for an existing chat. Chat ID: {chat['chatId']}\n"
+        context += f"Previous messages:\n"
+        for msg in chat_history[-2:]:
+            context += f"Q: {msg['question']}\nA: {msg['answer']}\n\n"
         
-        return ChatResponse(observation=outputs, answer=response, chatObjectId=str(chat_object_id), messageObjectId=str(message_object_id))
+        full_question = f"{context}New question: {request.question.text}\n\nPlease answer the new question in the context of the previous conversation."
+
+        response = agent_executor.run(full_question)
+        message, _ = process_response(response)
+
+        message_object_id = save_message(chatObjectId, chat["chatId"], request.question.text, outputs, message)
+
+        return ChatResponse(
+            observation=outputs,
+            answer=message,
+            chatObjectId=chatObjectId,
+            id=str(message_object_id),
+            question=request.question.text
+        )
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        error_message = str(e)
+        print("EXCEPTION")
+        if "Could not parse LLM output:" in error_message:
+            response = error_message.split("Could not parse LLM output:")[1].strip()
+            message, _ = process_response(response)
+            
+            message_object_id = save_message(chatObjectId, chat["chatId"], request.question.text, outputs, message)
+            
+            return ChatResponse(
+                observation=outputs,
+                answer=message,
+                chatObjectId=chatObjectId,
+                id=str(message_object_id),
+                question=request.question.text
+            )
+        
+        raise HTTPException(status_code=500, detail=error_message)
 
 # FastAPI endpoint to get all chats
 @app.get("/chats", response_model=List[Chat])
@@ -286,6 +409,20 @@ async def get_all_chats():
         for chat in chats:
             chat["id"] = str(chat["_id"])
             chat["chatId"] = chat.get("chatId", "Unknown")  # Add chatId if missing
+            del chat["_id"]
+        return chats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+
+## FastAPI endpoint to get all chats by userId
+@app.get("/chats/{userId}", response_model=List[Chat])
+async def get_chats_by_user_id(userId: str):
+    try:
+        chats = list(chats_collection.find({"userId": userId}))
+        for chat in chats:
+            chat["id"] = str(chat["_id"])
+            chat["chatId"] = chat.get("chatId", "Unknown")
             del chat["_id"]
         return chats
     except Exception as e:
@@ -305,6 +442,23 @@ async def get_messages_by_chat_object_id(chatObjectId: str):
         return messages
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+# FastAPI endpoint to get chats by a userId
+@app.get("/chats/user/{userId}", response_model=List[Chat])
+async def get_chats_by_user_id(userId: str):
+    try:
+        # Use the correct field for userId
+        chats = list(chats_collection.find({"userId": userId})) 
+        print(f"Chats found: {len(chats)}")  # Query by userId field
+        for chat in chats:
+            chat["id"] = str(chat["_id"])
+            chat["chatId"] = chat.get("chatId", "Unknown")
+            del chat["_id"]
+        return chats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 
 if __name__ == "__main__":
     import uvicorn
