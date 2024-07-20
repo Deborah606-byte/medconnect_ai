@@ -342,8 +342,17 @@ async def add_message_to_chat(chatObjectId: str, request: MessageRequest):
     outputs = []  # Clear previous outputs
 
     def process_response(response: str):
-        return response.strip(), ""  # No chat title for follow-up messages
-
+            chat_title_index = response.rfind("ChatTitle:")
+            message, chat_title = "", ""
+            if chat_title_index != -1:
+                # Extract the message (everything before "ChatTitle:")
+                message = response[:chat_title_index].strip()
+                
+                # Extract the chat title (everything after "ChatTitle:")
+                chat_title = response[chat_title_index + len("ChatTitle:"):].strip()
+            
+            return message, chat_title
+    
     def save_message(chat_object_id, chat_id, question, observation, answer):
         message_data = {
             "chatObjectId": chat_object_id,
