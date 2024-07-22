@@ -83,14 +83,15 @@ def google_search(query, api_key, cse_id):
 def google_wrapper(input_text):
     api_key = os.getenv("GOOGLE_API_KEY")
     cse_id = os.getenv("GOOGLE_CSE_ID")
-    search_results = google_search(f"site:uptodate.com {input_text}", api_key, cse_id)
     
-    formatted_results = ""
-    for result in search_results:
-        title = result.get('title', 'No title')
-        snippet = result.get('snippet', 'No snippet')
-        link = result.get('link', 'No link')
-        formatted_results += f"Title: {title}\nSnippet: {snippet}\nLink: {link}\n\n"
+    # Perform UpToDate search
+    uptodate_results = google_search(f"site:uptodate.com {input_text}", api_key, cse_id)
+    
+    # Perform Drugs.com search
+    drugs_results = google_search(f"site:drugs.com {input_text}", api_key, cse_id)
+    
+    formatted_results = "UpToDate Results:\n" + format_search_results(uptodate_results)
+    formatted_results += "\n\nDrugs.com Results:\n" + format_search_results(drugs_results)
     
     # Extract location from input
     location = input_text.split("Location:")[-1].split("\n")[0].strip() if "Location:" in input_text else ""
@@ -104,23 +105,30 @@ def google_wrapper(input_text):
     
     # Add medication suggestions
     medication_results = google_search(f"site:drugs.com {input_text} medications", api_key, cse_id)
-    formatted_medication_results = ""
-    for result in medication_results:
+    formatted_results += "\n\nSuggested Medications:\n" + format_search_results(medication_results)
+    
+    return formatted_results
+
+def format_search_results(results):
+    formatted = ""
+    for result in results[:3]:  # Limit to top 3 results
         title = result.get('title', 'No title')
         snippet = result.get('snippet', 'No snippet')
         link = result.get('link', 'No link')
-        formatted_medication_results += f"Title: {title}\nSnippet: {snippet}\nLink: {link}\n\n"
-    
-    formatted_results += "\n\nSuggested Medications:\n" + formatted_medication_results[:5]  # Limit to top 5 for brevity
-    
-    return formatted_results
+        formatted += f"Title: {title}\nSnippet: {snippet}\nLink: {link}\n\n"
+    return formatted
+
+def google_search(query, api_key, cse_id):
+    service = build("customsearch", "v1", developerKey=api_key)
+    res = service.cse().list(q=query, cx=cse_id).execute()
+    return res.get('items', [])  # Return an empty list if no items are found
 
 # Define tools
 tools = [
     Tool(
-        name="Search UpToDate and Drugs.com",
+        name="CombinedMedicalSearch",
         func=google_wrapper,
-        description="useful for when you need to answer medical and pharmacological questions"
+        description="performs a single search query on both UpToDate and Drugs.com for medical and pharmacological information"
     )
 ]
 
@@ -137,7 +145,7 @@ class CustomPromptTemplate(StringPromptTemplate):
             thoughts += f"\nObservation: {observation}\nThought: "
         kwargs["agent_scratchpad"] = thoughts
         kwargs["tools"] = "\n".join([f"{tool.name}: {tool.description}" for tool in self.tools])
-        kwargs["tool_names"] = ", ".join([tool.name for tool in self.tools])
+        kwargs["tool_names"] = self.tools[0].name  # Only use the name of the single tool
         return self.template.format(**kwargs)
 
 # Custom output parser
@@ -145,11 +153,14 @@ outputs = []
 class CustomOutputParser(AgentOutputParser):
     def parse(self, llm_output: str) -> AgentAction | AgentFinish:
         # Split the llm_output into blocks based on "Thought:" and "Observation:"
-        blocks = re.split(r"Observation:", llm_output)
+        blocks = re.split(r"(Thought:|Observation:)", llm_output)
         
-        for block in blocks:
-            if "Action:" in block and "Action Input:" in block:
-                observation = block.split("Action:")[0].strip()
+        for i in range(1, len(blocks), 2):
+            if blocks[i] == "Thought:":
+                thought = blocks[i] + blocks[i+1].split("Action:")[0].strip()
+                outputs.append(thought)
+            elif blocks[i] == "Observation:":
+                observation = blocks[i] + blocks[i+1].strip()
                 outputs.append(observation)
 
         if "Final Answer:" in llm_output:
@@ -166,7 +177,7 @@ class CustomOutputParser(AgentOutputParser):
         return AgentAction(tool=action, tool_input=action_input.strip(" ").strip('"'), log=llm_output)
 
 # Set up the agent
-template_with_history = """Answer the following questions as best you can, speaking as a compassionate medical professional. If you think there is need for diagnosis or treatment, provide further questions to be asked to the patient and recommend nearby healthcare facilities if available. You have access to the following tools:
+template_with_history = """Answer the following questions as best you can, speaking as a compassionate medical professional. If you think there is need for diagnosis or treatment, provide further questions to be asked to the patient and recommend nearby healthcare facilities if available. You have access to the following tool:
 
 {tools}
 
@@ -174,14 +185,14 @@ Use the following format:
 
 Question: the input question you must answer
 Thought: you should always think about what to do
-Action: the action to take, should be one of [{tool_names}]
-Action Input: the input to the action                       
+Action: the action to take, must be exactly "CombinedMedicalSearch"
+Action Input: the input to the action (your search query)
 Observation: the result of the action
 ... (this Thought/Action/Action Input/Observation can repeat N times)
 Thought: I now know the final answer
-Final Answer: the result of the action(observations), the final answer to the original input question, nearby healthcare facility recommendations if available, suggested medications if available, and a list of questions to ask the patient for better diagnosis.
+Final Answer: the final answer to the original input question, including nearby healthcare facility recommendations and suggested medications if available, and a list of questions to ask the patient for better diagnosis.
 
-Begin! Remember to provide all the questions to ask, if any, and always include nearby healthcare facility recommendations and suggested medications in your final answer if they are available.
+Begin! Remember to use only the exact tool name "CombinedMedicalSearch" for all searches. Do not try to use separate tools for UpToDate or Drugs.com.
 
 Previous conversation history:
 {history}
