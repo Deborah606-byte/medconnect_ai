@@ -15,7 +15,6 @@ from dotenv import load_dotenv
 from pymongo import MongoClient
 from bson import ObjectId
 import os
-from googleapiclient.discovery import build
 
 load_dotenv()
 
@@ -75,22 +74,9 @@ def find_nearby_hospitals(location: str) -> List[str]:
     return nearby
 
 # Custom search wrapper
-def google_search(query, api_key, cse_id):
-    service = build("customsearch", "v1", developerKey=api_key)
-    res = service.cse().list(q=query, cx=cse_id).execute()
-    return res.get('items', [])  # Return an empty list if no items are found
-
-def google_wrapper(input_text):
-    api_key = os.getenv("GOOGLE_API_KEY")
-    cse_id = os.getenv("GOOGLE_CSE_ID")
-    search_results = google_search(f"site:uptodate.com {input_text}", api_key, cse_id)
-    
-    formatted_results = ""
-    for result in search_results:
-        title = result.get('title', 'No title')
-        snippet = result.get('snippet', 'No snippet')
-        link = result.get('link', 'No link')
-        formatted_results += f"Title: {title}\nSnippet: {snippet}\nLink: {link}\n\n"
+def duck_wrapper(input_text):
+    search = DuckDuckGoSearchRun()
+    search_results = search.run(f"site:uptodate.com {input_text}")
     
     # Extract location from input
     location = input_text.split("Location:")[-1].split("\n")[0].strip() if "Location:" in input_text else ""
@@ -98,28 +84,21 @@ def google_wrapper(input_text):
     if location:
         nearby_hospitals = find_nearby_hospitals(location)
         if nearby_hospitals:
-            formatted_results += "\n\nNearby healthcare facilities for further diagnosis or treatment:\n" + "\n".join(nearby_hospitals[:5])  # Limit to top 5 for brevity
+            search_results += "\n\nNearby healthcare facilities for further diagnosis or treatment:\n" + "\n".join(nearby_hospitals[:5])  # Limit to top 5 for brevity
         else:
-            formatted_results += "\n\nNo specific healthcare facilities found in the exact location, please consult with a local healthcare provider."
+            search_results += "\n\nNo specific healthcare facilities found in the exact location, please consult with a local healthcare provider."
     
     # Add medication suggestions
-    medication_results = google_search(f"site:drugs.com {input_text} medications", api_key, cse_id)
-    formatted_medication_results = ""
-    for result in medication_results:
-        title = result.get('title', 'No title')
-        snippet = result.get('snippet', 'No snippet')
-        link = result.get('link', 'No link')
-        formatted_medication_results += f"Title: {title}\nSnippet: {snippet}\nLink: {link}\n\n"
+    medication_results = search.run(f"site:drugs.com {input_text} medications")
+    search_results += "\n\nSuggested Medications:\n" + "\n".join(medication_results[:5])  # Limit to top 5 for brevity
     
-    formatted_results += "\n\nSuggested Medications:\n" + formatted_medication_results[:5]  # Limit to top 5 for brevity
-    
-    return formatted_results
+    return search_results
 
 # Define tools
 tools = [
     Tool(
         name="Search UpToDate and Drugs.com",
-        func=google_wrapper,
+        func=duck_wrapper,
         description="useful for when you need to answer medical and pharmacological questions"
     )
 ]
@@ -291,16 +270,14 @@ async def chat(request: ChatRequest):
     outputs = []  # Clear previous outputs
 
     def process_response(response: str):
-        chat_title_index = response.rfind("ChatTitle:")
-        message, chat_title = "", ""
-        if chat_title_index != -1:
-            # Extract the message (everything before "ChatTitle:")
-            message = response[:chat_title_index].strip()
+            chat_title_index = response.rfind("ChatTitle:")
+            if chat_title_index != -1:
+                # Extract the message (everything before "ChatTitle:")
+                 message = response[:chat_title_index].strip()
+            else:
+                message = response.strip()
             
-            # Extract the chat title (everything after "ChatTitle:")
-            chat_title = response[chat_title_index + len("ChatTitle:"):].strip()
-        
-        return message, chat_title
+            return message
 
     def save_message(chat_object_id, chat_id, question, observation, answer):
         message_data = {
@@ -363,13 +340,14 @@ async def add_message_to_chat(chatObjectId: str, request: MessageRequest):
     outputs = []  # Clear previous outputs
 
     def process_response(response: str):
-        chat_title_index = response.rfind("ChatTitle:")
-        message = ""
-        if chat_title_index != -1:
-            # Extract the message (everything before "ChatTitle:")
-            message = response[:chat_title_index].strip()
-        
-        return message
+            chat_title_index = response.rfind("ChatTitle:")
+            if chat_title_index != -1:
+                # Extract the message (everything before "ChatTitle:")
+                 message = response[:chat_title_index].strip()
+            else:
+                message = response.strip()
+            
+            return message
     
     def save_message(chat_object_id, chat_id, question, observation, answer):
         message_data = {
@@ -397,7 +375,7 @@ async def add_message_to_chat(chatObjectId: str, request: MessageRequest):
         full_question = f"{context}New question: {request.question.text}\n\nPlease answer the new question in the context of the previous conversation."
 
         response = agent_executor.run(full_question)
-        message = process_response(response)
+        message, _ = process_response(response)
 
         message_object_id = save_message(chatObjectId, chat["chatId"], request.question.text, outputs, message)
 
@@ -414,7 +392,7 @@ async def add_message_to_chat(chatObjectId: str, request: MessageRequest):
         print("EXCEPTION")
         if "Could not parse LLM output:" in error_message:
             response = error_message.split("Could not parse LLM output:")[1].strip()
-            message = process_response(response)
+            message, _ = process_response(response)
             
             message_object_id = save_message(chatObjectId, chat["chatId"], request.question.text, outputs, message)
             
