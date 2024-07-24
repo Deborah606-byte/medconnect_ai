@@ -26,7 +26,7 @@ def configure_cors(app: FastAPI):
     origins = [
         "http://localhost",  # Allow local frontend
         "http://localhost:3000", 
-         "https://medconnect-knb2.onrender.com/" # Allow local frontend running on port 3000
+         "https://medconnect-knb2.onrender.com" # Allow local frontend running on port 3000
     ]
 
     app.add_middleware(
