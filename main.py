@@ -284,20 +284,7 @@ def generate_chat_id() -> str:
     print(f"Generated chatId: {new_chat_id}")  # Debugging statement
     return new_chat_id
 
-
-# Helper function to generate chat title
-def generate_chat_title(question: str) -> str:
-    # Extract the last few significant words from the question
-    words = question.split()
-    title = " ".join(words[-2:])  # Adjust the number of words as needed
-    
-    # Ensure the title is not too long
-    if len(title) > 30:
-        title = title[:27] + "..."
-    
-    return title
-
-
+#FastAPI endpoint of a chat
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     global outputs
